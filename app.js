@@ -243,10 +243,8 @@ async function sendMsg() {
     .single();
   if (error) { console.error(error); return; }
 
-  if (!msgsCache[active.id]) msgsCache[active.id] = [];
-  msgsCache[active.id].push(data);
-  renderMsgs(active.id);
-
+  // realtime will handle rendering, just update preview
+  
   // update preview
   const c = contacts.find(c => c.id === active.id);
   if (c) { c.last_msg = text; c.last_time = data.created_at; }
