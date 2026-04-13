@@ -1,8 +1,8 @@
 // ── CONFIG ──────────────────────────────────────────────────────────────────
 // These are replaced by Netlify environment variables at build time
 // Set SUPABASE_URL and SUPABASE_ANON_KEY in Netlify → Site Settings → Environment
-const SUPABASE_URL      = window.__SUPABASE_URL__      || '';
-const SUPABASE_ANON_KEY = window.__SUPABASE_ANON_KEY__ || '';
+const SUPABASE_URL      = 'https://ynwrbtimcyvjdliuiwql.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlud3JidGltY3l2amRsaXVpd3FsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYxMDE4MTksImV4cCI6MjA5MTY3NzgxOX0.s9QGt_Tx3kUt-9HHm1Y4htQeTQaFLuYkwXG-k8Qzh8w';
 
 // ── INIT ─────────────────────────────────────────────────────────────────────
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
