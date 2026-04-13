@@ -1,0 +1,11 @@
+{
+  "name": "cipher-chat",
+  "version": "1.0.0",
+  "description": "Private messaging app — hosted on Netlify, powered by Supabase",
+  "scripts": {
+    "build": "node inject-env.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
