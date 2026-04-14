@@ -1,25 +1,24 @@
-// ── CONFIG ──────────────────────────────────────────────────────────────────
-// These are replaced by Netlify environment variables at build time
-// Set SUPABASE_URL and SUPABASE_ANON_KEY in Netlify → Site Settings → Environment
+// ── CONFIG ───────────────────────────────────────────────────────────────────
 const SUPABASE_URL      = 'https://ynwrbtimcyvjdliuiwql.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlud3JidGltY3l2amRsaXVpd3FsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYxMDE4MTksImV4cCI6MjA5MTY3NzgxOX0.s9QGt_Tx3kUt-9HHm1Y4htQeTQaFLuYkwXG-k8Qzh8w';
 
-// ── INIT ─────────────────────────────────────────────────────────────────────
+// ── INIT ──────────────────────────────────────────────────────────────────────
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-let ME = null;          // { id, username, display_name }
-let contacts = [];      // array of profile objects + { last_msg, last_time, unread }
-let active = null;      // currently open contact
-let msgsCache = {};     // { [contactId]: [...messages] }
-let rtChannel = null;
+let ME         = null;   // { id, username, display_name }
+let contacts   = [];     // [{ ...profile, last_msg, last_time, unread }]
+let active     = null;   // currently open contact
+let msgsCache  = {};     // { [uid]: [...messages] }
+let rtChannel  = null;
+let pendingIds = new Set(); // IDs of messages we sent — skip in realtime to avoid duplicates
 
-// ── BOOT ─────────────────────────────────────────────────────────────────────
+// ── BOOT ──────────────────────────────────────────────────────────────────────
 (async () => {
   const { data: { session } } = await sb.auth.getSession();
   if (session) await bootApp(session.user);
 })();
 
-// ── AUTH ─────────────────────────────────────────────────────────────────────
+// ── AUTH ──────────────────────────────────────────────────────────────────────
 function switchTab(t) {
   document.getElementById('form-in').style.display = t === 'in' ? 'block' : 'none';
   document.getElementById('form-up').style.display = t === 'up' ? 'block' : 'none';
@@ -31,7 +30,7 @@ function switchTab(t) {
 async function doLogin() {
   const email = v('in-email'), pass = v('in-pass');
   if (!email || !pass) return setAuthMsg('Fill in all fields.', 'err');
-  setAuthMsg('Signing in…');
+  setAuthMsg('Authenticating…');
   const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
   if (error) return setAuthMsg(error.message, 'err');
   await bootApp(data.user);
@@ -43,48 +42,46 @@ async function doSignup() {
   const email = v('up-email').trim();
   const pass  = v('up-pass');
   if (!name || !uname || !email || !pass) return setAuthMsg('All fields are required.', 'err');
-  if (uname.length < 3) return setAuthMsg('Username must be at least 3 characters.', 'err');
-  if (pass.length < 6)  return setAuthMsg('Password must be at least 6 characters.', 'err');
+  if (uname.length < 3) return setAuthMsg('Username min 3 characters.', 'err');
+  if (pass.length < 6)  return setAuthMsg('Password min 6 characters.', 'err');
   setAuthMsg('Creating account…');
-  // Check username availability
   const { data: existing } = await sb.from('profiles').select('id').eq('username', uname).single();
-  if (existing) return setAuthMsg('Username taken, try another.', 'err');
+  if (existing) return setAuthMsg('Username taken — try another.', 'err');
   const { data, error } = await sb.auth.signUp({ email, password: pass });
   if (error) return setAuthMsg(error.message, 'err');
-  // Insert profile
   await sb.from('profiles').insert({ id: data.user.id, username: uname, display_name: name });
-  setAuthMsg('Account created! Signing you in…', 'ok');
-  setTimeout(() => doLogin(), 800);
+  setAuthMsg('Account created! Signing in…', 'ok');
   document.getElementById('in-email').value = email;
   document.getElementById('in-pass').value  = pass;
+  setTimeout(doLogin, 900);
 }
 
 async function doLogout() {
   if (rtChannel) sb.removeChannel(rtChannel);
   await sb.auth.signOut();
-  ME = null; contacts = []; active = null; msgsCache = {};
-  document.getElementById('app').style.display = 'none';
+  ME = null; contacts = []; active = null; msgsCache = {}; pendingIds.clear();
+  document.getElementById('app').style.display         = 'none';
   document.getElementById('auth-screen').style.display = 'flex';
-  document.getElementById('chat-view').style.display = 'none';
-  document.getElementById('chat-empty').style.display = 'flex';
+  document.getElementById('chat-view').style.display   = 'none';
+  document.getElementById('chat-empty').style.display  = 'flex';
 }
 
-// ── BOOT APP ─────────────────────────────────────────────────────────────────
+// ── BOOT APP ──────────────────────────────────────────────────────────────────
 async function bootApp(user) {
   const { data: profile } = await sb.from('profiles').select('*').eq('id', user.id).single();
-  if (!profile) { setAuthMsg('Profile missing. Please sign up.', 'err'); return; }
+  if (!profile) { setAuthMsg('Profile not found. Please sign up.', 'err'); return; }
   ME = profile;
   document.getElementById('auth-screen').style.display = 'none';
-  document.getElementById('app').style.display = 'flex';
-  document.getElementById('s-avatar').textContent    = ME.display_name.charAt(0).toUpperCase();
-  document.getElementById('chip-name').textContent   = ME.display_name;
-  document.getElementById('chip-id').textContent     = '@' + ME.username;
-  document.getElementById('my-id-badge').textContent = '@' + ME.username;
+  document.getElementById('app').style.display         = 'flex';
+  document.getElementById('s-avatar').textContent      = ME.display_name.charAt(0).toUpperCase();
+  document.getElementById('chip-name').textContent     = ME.display_name;
+  document.getElementById('chip-id').textContent       = '@' + ME.username;
+  document.getElementById('my-id-badge').textContent   = '@' + ME.username;
   await loadContacts();
   subscribeRealtime();
 }
 
-// ── CONTACTS ─────────────────────────────────────────────────────────────────
+// ── CONTACTS ──────────────────────────────────────────────────────────────────
 function getSavedIds() {
   try { return JSON.parse(localStorage.getItem('cc_contacts_' + ME.id)) || []; } catch { return []; }
 }
@@ -98,13 +95,11 @@ async function loadContacts() {
   if (!ids.length) { renderContacts(); return; }
   const { data: profiles } = await sb.from('profiles').select('*').in('id', ids);
   contacts = (profiles || []).map(p => ({ ...p, last_msg: '', last_time: null, unread: 0 }));
-  // Fetch last message for each contact
   await Promise.all(contacts.map(async c => {
     const { data } = await sb.from('messages')
-      .select('content,created_at,from_id')
+      .select('content,created_at')
       .or(`and(from_id.eq.${ME.id},to_id.eq.${c.id}),and(from_id.eq.${c.id},to_id.eq.${ME.id})`)
-      .order('created_at', { ascending: false })
-      .limit(1);
+      .order('created_at', { ascending: false }).limit(1);
     if (data?.[0]) { c.last_msg = data[0].content; c.last_time = data[0].created_at; }
   }));
   sortContacts();
@@ -130,8 +125,9 @@ function renderContacts(filter = '') {
 
   if (!list.length) {
     el.innerHTML = `<div class="no-contacts">
-      <div class="nc-icon">👋</div>
-      No chats yet.<br>Tap the <strong>chat icon</strong> above to start a new conversation.
+      <div class="nc-icon">⬡</div>
+      <div>No conversations yet.</div>
+      <div>Hit the compose icon to start one.</div>
     </div>`;
     return;
   }
@@ -142,7 +138,7 @@ function renderContacts(filter = '') {
       <div class="c-av ${avColor(c.id)}">${c.display_name.charAt(0).toUpperCase()}</div>
       <div class="c-info">
         <div class="c-name">${esc(c.display_name)}</div>
-        <div class="c-prev">${esc(c.last_msg || 'Tap to start chatting')}</div>
+        <div class="c-prev">${esc(c.last_msg || 'Start the conversation')}</div>
       </div>
       <div class="c-meta">
         <div class="c-time">${c.last_time ? fmtTime(c.last_time) : ''}</div>
@@ -154,25 +150,23 @@ function renderContacts(filter = '') {
 
 function filterList(q) { renderContacts(q); }
 
-// ── OPEN CHAT ────────────────────────────────────────────────────────────────
+// ── OPEN / CLOSE CHAT ─────────────────────────────────────────────────────────
 async function openChat(uid) {
   active = contacts.find(c => c.id === uid);
   if (!active) return;
   active.unread = 0;
 
-  // update header
   const av = document.getElementById('ct-av');
-  av.textContent  = active.display_name.charAt(0).toUpperCase();
-  av.className    = `ct-av ${avColor(active.id)}`;
+  av.textContent = active.display_name.charAt(0).toUpperCase();
+  av.className   = `ct-av ${avColor(active.id)}`;
   document.getElementById('ct-name').textContent = active.display_name;
   document.getElementById('ct-sub').textContent  = '@' + active.username;
 
-  document.getElementById('chat-empty').style.display    = 'none';
-  document.getElementById('chat-view').style.display     = 'flex';
+  document.getElementById('chat-empty').style.display = 'none';
+  document.getElementById('chat-view').style.display  = 'flex';
   document.getElementById('layout').classList.add('chat-open');
   renderContacts();
 
-  // Load messages
   if (!msgsCache[uid]) await fetchMsgs(uid);
   renderMsgs(uid);
   document.getElementById('msg-input').focus();
@@ -186,7 +180,7 @@ function closeChat() {
   renderContacts();
 }
 
-// ── MESSAGES ─────────────────────────────────────────────────────────────────
+// ── MESSAGES ──────────────────────────────────────────────────────────────────
 async function fetchMsgs(uid) {
   const { data } = await sb.from('messages')
     .select('*')
@@ -200,22 +194,20 @@ function renderMsgs(uid) {
   const el   = document.getElementById('msgs');
 
   if (!msgs.length) {
-    el.innerHTML = `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--t3);font-size:13px">
-      No messages yet — say hi! 👋
-    </div>`;
+    el.innerHTML = `<div class="msgs-empty">No messages yet — say hello!</div>`;
     return;
   }
 
   let lastDate = '', html = '';
   msgs.forEach(m => {
     const d  = new Date(m.created_at);
-    const ds = d.toLocaleDateString('en-IN', { weekday:'long', month:'short', day:'numeric' });
+    const ds = d.toLocaleDateString('en-IN', { weekday: 'long', month: 'short', day: 'numeric' });
     if (ds !== lastDate) {
       html += `<div class="date-sep"><span>${ds}</span></div>`;
       lastDate = ds;
     }
     const isMe = m.from_id === ME.id;
-    const t    = d.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
+    const t    = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
     html += `<div class="msg-row ${isMe ? 'me' : 'them'}">
       <div class="bub">
         <div class="bub-text">${esc(m.content).replace(/\n/g, '<br>')}</div>
@@ -231,6 +223,7 @@ function renderMsgs(uid) {
   el.scrollTop = el.scrollHeight;
 }
 
+// ── SEND — KEY FIX: add to cache immediately, mark as pending so realtime skips it ──
 async function sendMsg() {
   const inp  = document.getElementById('msg-input');
   const text = inp.value.trim();
@@ -239,13 +232,19 @@ async function sendMsg() {
 
   const { data, error } = await sb.from('messages')
     .insert({ from_id: ME.id, to_id: active.id, content: text })
-    .select()
-    .single();
+    .select().single();
   if (error) { console.error(error); return; }
 
-  // realtime will handle rendering, just update preview
-  
-  // update preview
+  // ✅ THE FIX: mark this message ID as "we already handled it"
+  // so the realtime listener skips it and doesn't add it a second time
+  pendingIds.add(data.id);
+
+  // Add to cache and render immediately (no waiting for realtime)
+  if (!msgsCache[active.id]) msgsCache[active.id] = [];
+  msgsCache[active.id].push(data);
+  renderMsgs(active.id);
+
+  // Update sidebar preview
   const c = contacts.find(c => c.id === active.id);
   if (c) { c.last_msg = text; c.last_time = data.created_at; }
   sortContacts(); renderContacts();
@@ -254,15 +253,19 @@ async function sendMsg() {
 function handleKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } }
 function growInput(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
 
-// ── REALTIME ─────────────────────────────────────────────────────────────────
+// ── REALTIME ──────────────────────────────────────────────────────────────────
 function subscribeRealtime() {
   rtChannel = sb.channel('global-msgs')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async payload => {
       const msg = payload.new;
+
+      // ✅ THE FIX: if WE sent this, skip — already handled in sendMsg()
+      if (pendingIds.has(msg.id)) { pendingIds.delete(msg.id); return; }
+
       if (msg.to_id !== ME.id && msg.from_id !== ME.id) return;
       const otherId = msg.from_id === ME.id ? msg.to_id : msg.from_id;
 
-      // Auto-add unknown sender
+      // Auto-add unknown sender to contacts
       if (!contacts.find(c => c.id === otherId)) {
         const { data: p } = await sb.from('profiles').select('*').eq('id', otherId).single();
         if (p) { saveId(p.id); contacts.push({ ...p, last_msg: '', last_time: null, unread: 0 }); }
@@ -284,18 +287,23 @@ function subscribeRealtime() {
     .subscribe();
 }
 
-// ── NEW CHAT MODAL ────────────────────────────────────────────────────────────
-function openNewChat()  { document.getElementById('nc-overlay').classList.add('open'); document.getElementById('nc-input').value = ''; document.getElementById('nc-msg').textContent = ''; setTimeout(() => document.getElementById('nc-input').focus(), 100); }
+// ── MODALS ────────────────────────────────────────────────────────────────────
+function openNewChat()  {
+  document.getElementById('nc-overlay').classList.add('open');
+  document.getElementById('nc-input').value = '';
+  document.getElementById('nc-msg').textContent = '';
+  setTimeout(() => document.getElementById('nc-input').focus(), 100);
+}
 function closeNewChat() { document.getElementById('nc-overlay').classList.remove('open'); }
 
 async function startChat() {
   const uname = document.getElementById('nc-input').value.trim();
   const msgEl = document.getElementById('nc-msg');
   if (!uname) return;
-  if (uname === ME.username) { msgEl.textContent = "That's you! 😄"; msgEl.className = 'auth-msg err'; return; }
-  msgEl.textContent = 'Searching…'; msgEl.className = 'auth-msg';
+  if (uname === ME.username) { msgEl.textContent = "That's you!"; msgEl.className = 'form-msg err'; return; }
+  msgEl.textContent = 'Searching…'; msgEl.className = 'form-msg';
   const { data } = await sb.from('profiles').select('*').eq('username', uname).single();
-  if (!data) { msgEl.textContent = 'User not found. Check the username.'; msgEl.className = 'auth-msg err'; return; }
+  if (!data) { msgEl.textContent = 'User not found. Check the username.'; msgEl.className = 'form-msg err'; return; }
   saveId(data.id);
   if (!contacts.find(c => c.id === data.id)) contacts.push({ ...data, last_msg: '', last_time: null, unread: 0 });
   renderContacts();
@@ -303,28 +311,28 @@ async function startChat() {
   openChat(data.id);
 }
 
-// ── MY ID MODAL ───────────────────────────────────────────────────────────────
 function showMyId()  { document.getElementById('id-overlay').classList.add('open'); }
 function closeMyId() { document.getElementById('id-overlay').classList.remove('open'); }
 function copyId() {
   navigator.clipboard.writeText(ME.username).then(() => {
-    document.getElementById('copy-msg').textContent = 'Copied to clipboard!';
+    document.getElementById('copy-msg').textContent = 'Copied!';
     setTimeout(() => document.getElementById('copy-msg').textContent = '', 2000);
   });
 }
 
 // ── UTILS ─────────────────────────────────────────────────────────────────────
-function v(id)    { return document.getElementById(id)?.value || ''; }
-function esc(s)   { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function v(id)  { return document.getElementById(id)?.value || ''; }
+function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function setAuthMsg(msg, type = '') {
   const el = document.getElementById('auth-msg');
-  el.textContent = msg; el.className = 'auth-msg' + (type ? ' ' + type : '');
+  el.textContent = msg;
+  el.className = 'auth-msg' + (type ? ' ' + type : '');
 }
 function fmtTime(ts) {
   const d = new Date(ts), now = new Date();
   if (d.toDateString() === now.toDateString())
     return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-  const diff = (now - d) / 86400000;
-  if (diff < 7) return d.toLocaleDateString('en-IN', { weekday: 'short' });
+  if ((now - d) / 86400000 < 7)
+    return d.toLocaleDateString('en-IN', { weekday: 'short' });
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: '2-digit' });
 }
